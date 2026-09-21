@@ -36,7 +36,7 @@ wifi:
   on_connect:
     then:
       - script.execute: wifi_connected
-      - script.execute: fetch_location
+      - script.execute: fetch_cloud_cover
   on_disconnect:
     then:
       - script.execute: wifi_error
@@ -223,84 +223,34 @@ script:
             - delay: 200ms
             - light.turn_off: adafruit_status_led
             - delay: 200ms
-  - id: fetch_location
-    then:
-      - if:
-          condition:
-            lambda: 'return String("${use_secrets_location}") == "true";'
-          then:
-            - lambda: |-
-                id(device_lat) = ${sec_lat};
-                id(device_lon) = ${sec_lon};
-                id(location_valid) = true;
-                ESP_LOGI("GEO", "Usando coordinate da secrets: lat=%.4f, lon=%.4f", id(device_lat), id(device_lon));
-            - script.execute: fetch_cloud_cover
-          else:
-            - http_request.get:
-                url: "https://ipwho.is/"
-                on_response:
-                  then:
-                    - lambda: |-
-                        if (status_code == 200) {
-                          JsonDocument doc;
-                          DeserializationError error = deserializeJson(doc, body);
-                          if (!error && doc["success"].as<bool>()) {
-                            id(device_lat) = doc["latitude"].as<float>();
-                            id(device_lon) = doc["longitude"].as<float>();
-                            id(location_valid) = true;
-                            ESP_LOGI("GEO", "Geolocalizzazione IP riuscita: lat=%.4f, lon=%.4f", id(device_lat), id(device_lon));
-                          } else {
-                            ESP_LOGW("GEO", "Fallita geolocalizzazione IP, fallback su secrets");
-                            id(device_lat) = ${sec_lat};
-                            id(device_lon) = ${sec_lon};
-                            id(location_valid) = (id(device_lat) != 0.0f && id(device_lon) != 0.0f);
-                          }
-                        } else {
-                          ESP_LOGW("GEO", "HTTP IP error: %d, fallback su secrets", status_code);
-                          id(device_lat) = ${sec_lat};
-                          id(device_lon) = ${sec_lon};
-                          id(location_valid) = (id(device_lat) != 0.0f && id(device_lon) != 0.0f);
-                        }
-                    - script.execute: fetch_cloud_cover
-
   - id: fetch_cloud_cover
     then:
-      - if:
-          condition:
-            lambda: 'return id(location_valid);'
-          then:
-            - http_request.get:
-                url: !lambda |-
-                  char buf[128];
-                  snprintf(buf, sizeof(buf), "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=cloud_cover", (double)id(device_lat), (double)id(device_lon));
-                  return std::string(buf);
-                on_response:
-                  then:
-                    - lambda: |-
-                        if (status_code == 200) {
-                          JsonDocument doc;
-                          DeserializationError error = deserializeJson(doc, body);
-                          if (!error) {
-                            float cc = doc["current"]["cloud_cover"] | -1.0f;
-                            if (cc >= 0.0f && cc <= 100.0f) {
-                              id(cloud_cover_val) = cc / 100.0f;
-                              ESP_LOGI("WEATHER", "Cloud cover aggiornato: %.2f (%.1f%%)", id(cloud_cover_val), cc);
-                            } else {
-                              ESP_LOGW("WEATHER", "Cloud cover fuori range: %.1f", cc);
-                              id(cloud_cover_val) = -1.0f;
-                            }
-                          } else {
-                            ESP_LOGE("WEATHER", "Errore parsing JSON Open-Meteo: %s", error.c_str());
-                            id(cloud_cover_val) = -1.0f;
-                          }
-                        } else {
-                          ESP_LOGE("WEATHER", "Errore HTTP Open-Meteo status: %d", status_code);
-                          id(cloud_cover_val) = -1.0f;
-                        }
-          else:
-            - lambda: |-
-                ESP_LOGW("WEATHER", "Posizione non valida, cloud impostato a -1");
-                id(cloud_cover_val) = -1.0f;
+      - http_request.get:
+          url: "https://api.open-meteo.com/v1/forecast?latitude=${sec_lat}&longitude=${sec_lon}&current=cloud_cover"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code == 200) {
+                    JsonDocument doc;
+                    DeserializationError error = deserializeJson(doc, body);
+                    if (!error) {
+                      float cc = doc["current"]["cloud_cover"] | -1.0f;
+                      if (cc >= 0.0f && cc <= 100.0f) {
+                        id(cloud_cover_val) = cc / 100.0f;
+                        ESP_LOGI("WEATHER", "Cloud cover aggiornato: %.2f (%.1f%%)", id(cloud_cover_val), cc);
+                      } else {
+                        ESP_LOGW("WEATHER", "Cloud cover fuori range: %.1f", cc);
+                        id(cloud_cover_val) = -1.0f;
+                      }
+                    } else {
+                      ESP_LOGE("WEATHER", "Errore parsing JSON Open-Meteo: %s", error.c_str());
+                      id(cloud_cover_val) = -1.0f;
+                    }
+                  } else {
+                    ESP_LOGE("WEATHER", "Errore HTTP Open-Meteo status: %d", response->status_code);
+                    id(cloud_cover_val) = -1.0f;
+                  }
 
   - id: send_to_adafruit
     mode: queued
@@ -490,4 +440,4 @@ interval:
       - script.execute: send_to_adafruit
   - interval: 30min
     then:
-      - script.execute: fetch_location
+      - script.execute: fetch_cloud_cover
