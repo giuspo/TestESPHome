@@ -2,6 +2,10 @@
 esphome:
   name: solar-monitor-box
   friendly_name: Solar Monitor Box
+  on_boot:
+    priority: 600.0
+    then:
+      - script.execute: fetch_cloud_cover
 
 substitutions:
   use_secrets_location: !secret use_secrets_location
@@ -225,32 +229,48 @@ script:
             - delay: 200ms
   - id: fetch_cloud_cover
     then:
-      - http_request.get:
-          url: "https://api.open-meteo.com/v1/forecast?latitude=${sec_lat}&longitude=${sec_lon}&current=cloud_cover"
-          capture_response: true
-          on_response:
-            then:
-              - lambda: |-
-                  if (response->status_code == 200) {
-                    JsonDocument doc;
-                    DeserializationError error = deserializeJson(doc, body);
-                    if (!error) {
-                      float cc = doc["current"]["cloud_cover"] | -1.0f;
-                      if (cc >= 0.0f && cc <= 100.0f) {
-                        id(cloud_cover_val) = cc / 100.0f;
-                        ESP_LOGI("WEATHER", "Cloud cover aggiornato: %.2f (%.1f%%)", id(cloud_cover_val), cc);
-                      } else {
-                        ESP_LOGW("WEATHER", "Cloud cover fuori range: %.1f", cc);
-                        id(cloud_cover_val) = -1.0f;
-                      }
-                    } else {
-                      ESP_LOGE("WEATHER", "Errore parsing JSON Open-Meteo: %s", error.c_str());
-                      id(cloud_cover_val) = -1.0f;
-                    }
-                  } else {
-                    ESP_LOGE("WEATHER", "Errore HTTP Open-Meteo status: %d", response->status_code);
-                    id(cloud_cover_val) = -1.0f;
-                  }
+      - lambda: |-
+          if (String("${use_secrets_location}") != "true") {
+            ESP_LOGW("WEATHER", "use_secrets_location è false (modalità automatica): disabilitato invio nuvolosità (cloud = -1)");
+            id(cloud_cover_val) = -1.0f;
+            return;
+          }
+          if (${sec_lat} == 0.0f || ${sec_lon} == 0.0f) {
+            ESP_LOGW("WEATHER", "Coordinate non definite in secrets.yaml, cloud impostato a -1");
+            id(cloud_cover_val) = -1.0f;
+            return;
+          }
+          ESP_LOGI("WEATHER", "Richiesta meteo Open-Meteo per Lat: ${sec_lat}, Lon: ${sec_lon}");
+      - if:
+          condition:
+            lambda: 'return String("${use_secrets_location}") == "true" && ${sec_lat} != 0.0f && ${sec_lon} != 0.0f;'
+          then:
+            - http_request.get:
+                url: "https://api.open-meteo.com/v1/forecast?latitude=${sec_lat}&longitude=${sec_lon}&current=cloud_cover"
+                capture_response: true
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code == 200) {
+                          JsonDocument doc;
+                          DeserializationError error = deserializeJson(doc, body);
+                          if (!error) {
+                            float cc = doc["current"]["cloud_cover"] | -1.0f;
+                            if (cc >= 0.0f && cc <= 100.0f) {
+                              id(cloud_cover_val) = cc / 100.0f;
+                              ESP_LOGI("WEATHER", "Cloud cover aggiornato: %.2f (%.1f%%)", id(cloud_cover_val), cc);
+                            } else {
+                              ESP_LOGW("WEATHER", "Cloud cover fuori range: %.1f", cc);
+                              id(cloud_cover_val) = -1.0f;
+                            }
+                          } else {
+                            ESP_LOGE("WEATHER", "Errore parsing JSON Open-Meteo: %s", error.c_str());
+                            id(cloud_cover_val) = -1.0f;
+                          }
+                        } else {
+                          ESP_LOGE("WEATHER", "Errore HTTP Open-Meteo status: %d", response->status_code);
+                          id(cloud_cover_val) = -1.0f;
+                        }
 
   - id: send_to_adafruit
     mode: queued
@@ -428,7 +448,7 @@ script:
               t_str,
               cloud_str);
 
-            ESP_LOGI("ADAFRUIT", "Body inviato: %s", json_buffer);
+            ESP_LOGI("ADAFRUIT", "Body inviato (Lat: %s, Lon: %s): %s", "${sec_lat}", "${sec_lon}", json_buffer);
             return std::string(json_buffer);
       # Indica il successo dell'invio a Adafruit
       - script.execute: adafruit_ok
